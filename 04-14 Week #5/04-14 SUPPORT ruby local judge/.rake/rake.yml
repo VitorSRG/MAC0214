@@ -1,0 +1,94 @@
+---
+DEFAULTS:
+  d:
+    d:
+      d: >-2
+        rake j:%{domain}:"%{filerel}"
+      n: >-2
+        cp "%{rakedir}/.rake/default.%{filetype}" "%{filerel}"
+      p: ~
+      b: ~
+      r: ~
+      j: ~
+      c: ~
+    cpp:
+      p: >-2
+        /^\s\*\s\s@(\w+)\s+(.*?)\n$/
+      b: >-2
+        /usr/bin/g++-6 -static -lm -s -x c++ 
+        -O2 -std=c++11 -pthread -O3
+        -o "%{dirrel}/%{filebase}.bin" "%{filerel}"
+        -fdiagnostics-color=always 
+      r: >-2
+        ./"%{dirrel}/%{filebase}.bin"
+      c: >-2
+        rm -f "%{dirrel}/%{filebase}.bin"
+    py:
+      p: >-2
+        /^\s{4}:(\w+):\s+(.*?)\n$/
+      r: >-2
+        /usr/bin/python3.5 "%{filerel}"
+    java:
+      p: >-2
+        /^\s\*\s\s@(\w+)\s+(.*?)\n$/
+      c: >-2
+        rm -f "%{dirrel}/Solution.class"
+
+  cf19:
+    cpp:
+      b: >-2
+        /usr/bin/g++-4.9 -static -DONLINE_JUDGE -lm -s -x c++ 
+        -O2 -std=c++11 
+        -D__USE_MINGW_ANSI_STDIO=0 -o "%{dirrel}/%{filebase}.bin" "%{filerel}"
+        -fdiagnostics-color=always 
+    py:
+      r: >-2
+        /usr/bin/python3.4 "%{filerel}"
+
+
+  gcj19:
+    d:
+      n: >-2
+        cp "%{rakedir}/.rake/gcj19/default.%{filetype}" "%{filerel}"
+    cpp:
+      b: >-2
+        /usr/bin/g++-6 "%{filerel}" 
+        -std=c++14 -pthread -O3 
+        -fdiagnostics-color=always 
+        -o "%{dirrel}/%{filebase}.bin"
+    py:
+      r: >-2
+        /usr/bin/python3.5 "%{filerel}"
+    java:
+      b: >-2
+        cp "%{filerel}" "%{dirrel}/Solution.java"; 
+        /usr/lib/jvm/java-8-oracle/bin/javac Solution.java
+      r: >-2
+        /usr/lib/jvm/java-8-oracle/bin/java "%{dirrel}/Solution"
+
+  kat19:
+    cpp:
+      b: >-2
+        /usr/bin/g++-7 "%{filerel}" 
+        -g -O2 -static -std=gnu++17 
+        -fdiagnostics-color=always 
+        -o "%{dirrel}/%{filebase}.bin"
+
+ALIASES:
+  d: [d, default]
+  n: [n, new]
+  p: [p, parse]
+  s: [s, save]
+  b: [b, build]
+  r: [r, run]
+  j: [j, judge]
+  c: [c, clear]
+
+  cpp: [.cpp, .cc, .c++]
+  py: [.py]
+  java: [.java]
+
+  gf19: [codeforces2019, gf19, codeforces19, codeforces, codeforces, gf]
+  gcj19: [googlecodejam2019, gcj19, codejam19, googlecodejam, codejam, gcj]
+  kat19: [kattis2019, kat19, kattis19, kattis, kat]
+...

@@ -1,0 +1,478 @@
+#!/usr/bin/env rake
+
+# rake <task>
+
+
+require 'awesome_print'
+require 'colorize'
+require 'open3'
+require 'rake'
+require 'stringio'
+require 'tempfile'
+require 'time'
+require 'yaml'
+
+# if File.exist?(File.expand_path('~/Rakefile'))
+#   import '~/Rakefile'
+# end
+
+# region classes
+class String
+  def truncate(n)
+    self[0..(n-1)]
+  end
+
+  def filter_format?(outfile=$stdout)
+    if outfile.nil? || outfile.isatty
+      self
+    else
+      self.uncolorize
+    end
+  end
+
+  def escape
+    self.dump[1..-2]
+  end
+  
+  def unescape
+    "\"#{self}\"".undump
+  end
+
+  def return
+    self + "\033[0K\r"
+  end
+end
+
+class Numeric
+  def s()   self        end
+  def m()   60*self     end
+  def h()   60*60*self  end
+
+  def b()   self        end
+  def kb()  10**3*self  end
+  def mb()  10**6*self  end
+  def gb()  10**9*self  end
+end
+
+class Rake::FileTask
+  def needed?
+    true
+  end
+end
+
+class FileCreationTask
+  def needed?
+    true
+  end
+end
+# # endregions
+
+
+
+#region defaults
+# Rake.application.options.build_all = true
+
+DEFAULTS, ALIASES_ = YAML::load_file("#{File.dirname(__FILE__)}/.rake/rake.yml")
+                           .values_at('DEFAULTS', 'ALIASES').compact
+
+ALIASES = Hash[ALIASES_.map {|k, v| v.map {|vi| [vi, k]}}.flatten(1)]
+
+# DEBUG = true
+DEBUG = false
+#endregion
+
+#region utils
+def parse(text, metapattern)
+  pairs = text.gsub(/\s*\\\n\s*/, ' ').each_line \
+          .select {|line| line.match metapattern } \
+          .map {|line| line.scan(metapattern)[0]}
+          .map {|k, v| [k, v] unless v.empty?}.compact
+
+  metainfo = Hash[pairs]
+  metainfo['tags'] = pairs.map {|k, v| v if k == 'tags'}
+                     .compact.join(' ').strip.split(/\s+/)
+  metainfo['tests'] = pairs.map {|k, v| v if k == 'tests'}
+                      .compact
+    
+  metainfo = metainfo.merge Hash[metainfo.map \
+             {|k, v| [ALIASES[k], v] unless ALIASES[k].nil? }.compact]
+  
+  metainfo
+end
+
+def sandbox(cmd, stdin_data: "", memory_limit: nil, time_limit: nil)
+  timefile = Tempfile.new('timefile')
+
+  memory_limit = (2*memory_limit/1.kb).to_i unless memory_limit.nil?
+  time_limit = (2*time_limit/1.s).to_i unless time_limit.nil?
+
+  box =  "time -o #{timefile.path} -f \"\%e \%M \%x\" sh -c \""
+  box << "ulimit -v #{memory_limit}; " unless memory_limit.nil?
+  box << "ulimit -m #{memory_limit}; " unless memory_limit.nil?
+  box << "ulimit -t #{time_limit}; " unless time_limit.nil?
+  box << "timeout -k #{time_limit} #{time_limit} " unless time_limit.nil?
+  # box << "script -q -e -c \"".escape << "#{cmd}".escape.escape << "\" /dev/null".escape << "\""
+  box << "sh -c \"".escape << "#{cmd}".escape.escape << "\"".escape << "\""
+
+  oe, s = Open3.capture2e(box, stdin_data: stdin_data)
+
+  output = oe
+  time, memory, status = timefile.read.strip.split(/\s+/)[-3..-1]
+  timefile.close
+  timefile.unlink
+
+  time = (Time.strptime(time, "%M:%S.%L", Time.at(0)) \
+          rescue Time.strptime(time, "%S.%L", Time.at(0))).to_f
+  memory = memory.to_i.kb
+  status = status.to_i
+
+  [output, time, memory, status]
+end
+
+def judge_build(build, locals)
+  if $stdout.isatty
+    printf "BUILD".bold.return
+    $stdout.flush
+  end
+
+  output, time, memory, status = sandbox(build % locals)
+
+
+  row_data = ["BUILD",
+              "#{('%.2f' % (memory/1.mb)).gsub(/\.?0?0?$/, '')}MB",
+              "#{('%.2f' % (time/1.s)).gsub(/\.?0?0?$/, '')}s",
+              if status == 0 then "SUCCESS" else "FAILURE" end]
+  row_format = [[[:ljust, 10], [:bold]],
+                [[:strip], [:ljust, 10], [memory <= 256.mb ? :green : :red]],
+                [[:strip], [:ljust, 10], [time <= 1.s ? :green : :red]],
+                [[:ljust, 10], [if status == 0 then :green else :red end]]]
+  row = row_data.zip(row_format).map \
+        {|data, format| format.inject(data) {|o, a| o.send(*a) }}.join
+
+  puts row.filter_format?
+  if locals[:metainfo]['verbose'] == 'true' || status != 0
+    puts build % locals
+    puts output.filter_format? unless output.uncolorize =~ /^\s*$/
+  end
+  $stdout.flush
+
+  return status == 0
+end
+
+def judge_tests(run, locals)
+  memory_limit = Float::INFINITY
+  time_limit = Float::INFINITY
+  verbose = locals[:metainfo]['verbose'] == 'true'
+  quiet = false
+  cols = %x{tput cols}.to_i
+
+  # ap \
+  # (1..20).map {|n| [n, 20, n.times.map {('A'..'Z').to_a.sample}.join]} \
+  #        .map {|(n, q, s)| "#{n} #{q}\n#{s}" \
+  #                          "#{q.times.map {l = (1..n).to_a.sample; \
+  #                                          "#{l} #{(l..n).to_a.sample}\n"} \
+  #                             .join}"}
+
+  table_format = [[[:rjust, 2]], 
+                  [[:strip], [:ljust, 8]], 
+                  [[:strip], [:ljust, 7]], 
+                  [[:ljust, 5]],
+                  *([[[:truncate, 30], [:ljust, 30]]]*3)]
+
+  table_format[5] = [[:truncate, 20], [:ljust, 20]] if cols < 140
+  table_format[6] = [[:truncate, 20], [:ljust, 20]] if cols < 140
+  table_format[5] = [[:delete!, '']] if cols < 100
+  table_format[3] = [[:truncate, 10], [:ljust, 10]] if cols < 80
+  table_format[6] = [[:delete!, '']] if cols < 80
+  table_format[4] = [[:delete!, '']] if cols < 50
+
+
+  def judge_memory(memory, memory_limit)
+    ["#{('%8.2f' % (memory/1.mb)).gsub(/\.?0?0?$/, '')}MB", 
+     [memory <= memory_limit ? :green : :red]]
+  end
+
+  def judge_time(time, time_limit)
+    ["#{('%6.2f' % (time/1.s)).gsub(/\.?0?0?$/, '')}s ", 
+     [time <= time_limit ? :green : :red]]
+  end
+
+  def judge_status(status, output, expected)
+    if status != 0
+      [status.to_s, [:red]]
+    elsif output == expected
+      ["OK", [:green]]
+    elsif output.strip.split == expected.strip.split
+      ["SPACE", [:yellow]]
+    else
+      ["NO", [:red]]
+    end
+  end
+
+  test_defaults = Proc.new do |_, m: nil, t: nil, v: nil, q: nil|
+    memory_limit = m unless m.nil?
+    time_limit = t unless t.nil?
+    verbose = v unless v.nil?
+    quiet = q unless q.nil?
+    nil
+  end
+
+  test = Proc.new do |name, input, expected, cmd, m: nil, t: nil, v: nil, q: nil|
+    m = m || memory_limit
+    t = t || time_limit
+    v = verbose if v.nil?
+    q = quiet if q.nil?
+
+    output, time, memory, status = sandbox(run % locals, 
+                                           stdin_data: input, 
+                                           memory_limit: m, 
+                                           time_limit: t)
+
+    row = [[name, []],
+           judge_memory(memory, m), 
+           judge_time(time, t),
+           judge_status(status, output, expected),
+           [input.escape,    [[:gsub, /(?<!\\)\\n/, "\u21b5 "], [:encode, "utf-8"]]],
+           [output.escape,   [[:gsub, /(?<!\\)\\n/, "\u21b5 "], [:encode, "utf-8"]]],
+           [expected.escape, [[:gsub, /(?<!\\)\\n/, "\u21b5 "], [:encode, "utf-8"]]]]
+    veredict = row[3][0]
+
+    row = row.zip(table_format).map \
+          {|(data, data_format), col_format| [data, col_format+data_format]} \
+          .map {|data, format| format.inject(data) {|o, a| o.send(*a) if o }} \
+          .compact.join('  ')
+
+    puts row
+    $stdout.flush
+
+    if !q && (v || status != 0 || veredict == 'SPACE' || veredict == 'NO')
+      puts cmd
+      
+      expectedfile = Tempfile.new('expectedfile')
+      outputfile = Tempfile.new('outputfile')
+
+      expectedfile.write expected
+      outputfile.write output
+      expectedfile.close
+      outputfile.close
+
+      # diff, _ = Open3.capture2e("sdiff #{expectedfile.path} "\
+      #                                 "#{outputfile.path} "\
+      #                                 "-w #{[cols, 140].min}")
+      # diff, _ = Open3.capture2e("colordiff #{expectedfile.path} "\
+      #                                 "#{outputfile.path}")
+      diff, _ = Open3.capture2e("colordiff -y --width=#{cols} " \
+                                "#{outputfile.path} "\
+                                "#{expectedfile.path}")
+
+      expectedfile.unlink
+      outputfile.unlink
+
+      puts diff.filter_format?
+    end
+    $stdout.flush
+  end
+
+  test_literal = Proc.new do |name, input, expected=nil, m: nil, t: nil, v: nil, q: nil|
+    test.call name, input, expected || "", \
+              "printf \"#{input.escape}\" | #{run % locals}", \
+              m: m, t: t, v: v, q: q || (expected.nil? \
+                                         if q.nil? && expected.nil?)
+  end
+
+  test_file = Proc.new do |name, testfile, m: nil, t: nil, v: nil, q: nil|
+    inputfile = "%{dirrel}/%{filebase}.#{testfile}.in" % locals
+    expectedfile = "%{dirrel}/%{filebase}.#{testfile}.out" % locals
+    input = File.read(inputfile)
+    expected = File.read(expectedfile)
+
+    test.call name, input, expected, \
+              "#{run % locals} < #{inputfile}", \
+              m: m, t: t, v: v, q: q
+  end
+
+  # test_unit = Proc.new do |input, m: nil, t: nil|
+  #   ap ['unit', input, m || memory_limit, t || time_limit]
+  # end
+
+  # test_manual = Proc.new do |code, m: nil, t: nil|
+  #   ap ['manual', code, m || memory_limit, t || time_limit]
+  # end
+
+  title = %w{#n memory  time stat input output expected}
+  title = title.zip(table_format).map \
+          {|col, format| format.inject(col) {|o, a| o.send(*a) if o }} \
+          .compact.join('  ').bold.filter_format?
+  puts title
+  $stdout.flush
+
+  locals[:metainfo]['tests'] \
+    .map {|line| line.scan(/^(\w+?)\s+(.*)$/)[0]} \
+    .map {|method, args| "test_#{method}.call i.to_s, #{args}"} \
+    .map.with_index(1) {|line, i| eval(line % locals)}
+end
+#endregion
+
+#region defaults
+# #TODO change rake help
+desc "run make judge"
+task :d, :default do |task, args| end
+
+desc "new solution"
+task :n, :new     do |task, args| end
+
+desc "build solution"
+task :b, :build   do |task, args| end
+
+desc "run solution"
+task :r, :run     do |task, args| end
+
+desc "compile and test solution"
+task :j, :judge   do |task, args| end
+
+desc "clean binaries"
+task :c, :clear   do |task, args| end
+
+
+rule /^(?:([\W\w]+?)\:(?:([\W\w]+?)\:)?)?([\W\w]+?\.\w+?)$/ do |task, args|
+  action, domain, file = task.name.scan(/^(?:([\W\w]+?)\:
+                                             (?:([\W\w]+?)\:)?)?
+                                          ([\W\w]+?\.\w+?)$/x)[0]
+
+  raise "file?" if file.nil? && DEBUG
+  return if file.nil?
+
+  action = action.downcase if action
+  domain = domain.downcase if domain
+
+  action, domain = ALIASES[action], ALIASES[domain]
+
+  if !domain && action && !['d', 'n', 'b', 'r', 'j', 'c'].include?(action)
+    action, domain = domain, action
+  end
+
+  workdir  = Rake.original_dir
+  rakedir  = File.dirname(__FILE__)
+  fileabs  = File.expand_path(file, workdir)
+  filerel  = Pathname.new(fileabs).relative_path_from(
+             Pathname.new(rakedir)).to_s
+  fileext  = File.extname(fileabs)
+  filetype = ALIASES[fileext.downcase]
+  filebase = File.basename(fileabs, fileext)
+  dirabs   = File.dirname(fileabs)
+  dirrel   = File.dirname(filerel)
+
+  raise "type?" if filetype.nil? && DEBUG
+  return if filetype.nil?
+
+
+  if !File.exists?(fileabs)
+    action = 'n'
+    metainfo = {}
+  else
+    # metainfo = parse(filerel, filetype)
+    doc = DEFAULTS.dig(domain, filetype, 'p') ||
+          DEFAULTS.dig(domain, 'd', 'p')      ||
+          DEFAULTS.dig('d', filetype, 'p')    ||
+          DEFAULTS.dig('d', 'd', 'p')
+
+    raise "parse?" if doc.nil? && DEBUG
+    return if doc.nil?
+      
+    metainfo = parse(File.read(fileabs), eval(doc))
+    domain = domain || metainfo['domain'].downcase.gsub(/\s+/, '')
+  end
+
+  action, domain = ALIASES[action] || 'd', ALIASES[domain] || 'd'
+
+  
+  local_names = binding.send(:local_variables)
+  locals = local_names.reduce({}) do |acc, v| 
+    acc[v] = binding.eval(v.to_s) unless v == :_
+    acc
+  end
+
+  cmd = metainfo[action]                       ||
+        DEFAULTS.dig(domain, filetype, action) ||
+        DEFAULTS.dig(domain, 'd', action)      ||
+        DEFAULTS.dig('d', filetype, action)    ||
+        DEFAULTS.dig('d', 'd', action)         ||
+        DEFAULTS.dig('d', 'd', 'd')
+  
+  raise "what?" if cmd.nil? && DEBUG
+  return if cmd.nil?
+
+
+  case action
+  when 'b'
+    judge_build(cmd, locals)
+  when 'j'
+    build = metainfo['b']                       ||
+            DEFAULTS.dig(domain, filetype, 'b') ||
+            DEFAULTS.dig(domain, 'd', 'b')      ||
+            DEFAULTS.dig('d', filetype, 'b')    ||
+            DEFAULTS.dig('d', 'd', 'b')
+
+    run = metainfo['r']                       ||
+          DEFAULTS.dig(domain, filetype, 'r') ||
+          DEFAULTS.dig(domain, 'd', 'r')      ||
+          DEFAULTS.dig('d', filetype, 'r')    ||
+          DEFAULTS.dig('d', 'd', 'r')
+
+    clean = metainfo['c']                       ||
+            DEFAULTS.dig(domain, filetype, 'c') ||
+            DEFAULTS.dig(domain, 'd', 'c')      ||
+            DEFAULTS.dig('d', filetype, 'c')    ||
+            DEFAULTS.dig('d', 'd', 'c')
+
+    judge_tests(run, locals) if build.nil? || judge_build(build, locals)
+
+    sh clean % locals, verbose: false unless clean.nil?
+  else
+    sh cmd % locals, verbose: false
+  end
+end
+#endregion
+
+#region lookups
+desc "time complexity limits"
+task :time_limits do |task, args|
+  table = []
+
+  table << ['max n' , 'worst class'   , 'class type'  , 'example'               ]
+  table << ['11'    , 'O(n!), O(n^6)' , 'exponential' , 'permutations'          ]
+  table << ['18'    , 'O(2^n n^2)'    , ''            , 'DP TSP'                ]
+  table << ['22'    , 'O(2^n n)'      , ''            , 'DP with bitmask'       ]
+  table << ['100'   , 'O(n^4)'        , 'quartic'     , 'DP with 3 dimentions'  ]
+  table << ['400'   , 'O(n^3)'        , 'cubic'       , 'Floyd Warshall'        ]
+  table << ['2K'    , 'O(n^2 lg n)'   , ''            , '2-nested loops + tree' ]
+  table << ['10K'   , 'O(n^2)'        , 'quadratic'   , 'Insertion sort'        ]
+  table << ['1M'    , 'O(n lg n)'     , 'linearithmic', 'Merge sort, segtree'   ]
+  table << ['100M'  , 'O(n)'          , 'linear'      , 'Merge sort, segtree'   ]
+  table << [''      , 'O(lg n)'       , 'logarithmic' , 'binary search'         ]
+  table << [''      , 'O(1)'          , 'constant'    , 'hash lookup'           ]
+
+
+  table = table.transpose.map do |col|
+    max_len = col.map {|si| si.length}.max
+    col.map! {|si| si.ljust(max_len)}
+  end.transpose
+
+  table = table.map {|row| ' ' << row.join('   ') << ' '}
+  table[0] = table[0].bold
+  table = table.join("\n")
+
+  puts table.filter_format?
+end
+
+desc "memory complexity limits"
+task :memory_limits do |task, args|
+  # #TODO
+end
+#endregion
+
+rule /.*/ do |task, args|
+  if File.exist?(File.expand_path('~/Rakefile'))
+    load '~/Rakefile'
+  end
+end
