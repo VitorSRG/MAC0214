@@ -1,0 +1,97 @@
+# https://yaml.org/spec/1.2/spec.html
+# https://yaml-multiline.info/
+---
+DEFAULTS:
+  d:
+    d:
+      d: >-
+        rake j:{domain}:"{filerel}"
+      n: >-
+        cp "{rakedir}/.rake/default.{filetype}" "{filerel}"
+      p: ~
+      b: ~
+      r: ~
+      j: ~
+      c: ~
+    cpp: &cpp
+      p: >-
+        \/\*{78}\n((?:.*\n)*?)\s\*{78}\/
+      b: >-
+        /usr/bin/g++-7 -static -lm -s -x c++ 
+        -O2 -std=c++11 -pthread -O3
+        -o "{dirrel}/{filebase}.bin" "{filerel}"
+        -fdiagnostics-color=always 
+      r: >-
+        ./"{dirrel}/{filebase}.bin"
+      c: >-
+        rm -f "{dirrel}/{filebase}.bin"
+    cpp14:
+      <<: *cpp
+      b: >-
+        /usr/bin/g++-7 -static -lm -s -x c++ 
+        -O2 -std=c++14 -pthread -O3
+        -o "{dirrel}/{filebase}.bin" "{filerel}"
+        -fdiagnostics-color=always 
+    py:
+      p: >-
+        /^\s{4}:(\w+):\s+(.*?)\n$/
+      r: >-
+        /usr/bin/python3.5 "{filerel}"
+    java:
+      p: >-
+        /^\s\*\s\s@(\w+)\s+(.*?)\n$/
+      c: >-
+        rm -f "{dirrel}/Solution.class"
+
+  cf19:
+    cpp:
+      b: >-
+        /usr/bin/g++-4.9 -static -DONLINE_JUDGE -lm -s -x c++ 
+        -O2 -std=c++11 
+        -D__USE_MINGW_ANSI_STDIO=0 -o "{dirrel}/{filebase}.bin" "{filerel}"
+        -fdiagnostics-color=always 
+    py:
+      r: >-
+        /usr/bin/python3.4 "{filerel}"
+
+
+  gcj19:
+    d:
+      n: >-
+        cp "{rakedir}/.rake/gcj19/default.{filetype}" "{filerel}"
+    cpp:
+      b: >-
+        /usr/bin/g++-6 "{filerel}" 
+        -std=c++14 -pthread -O3 
+        -fdiagnostics-color=always 
+        -o "{dirrel}/{filebase}.bin"
+    py:
+      r: >-
+        /usr/bin/python3.5 "{filerel}"
+    java:
+      b: >-
+        cp "{filerel}" "{dirrel}/Solution.java"; 
+        /usr/lib/jvm/java-8-oracle/bin/javac Solution.java
+      r: >-
+        /usr/lib/jvm/java-8-oracle/bin/java "{dirrel}/Solution"
+
+
+ALIASES:
+  d: [d, default]
+  n: [n, new]
+  p: [p, parse]
+  s: [s, save]
+  b: [b, build]
+  r: [r, run]
+  j: [j, judge]
+  c: [c, clear]
+
+  cpp: [.cpp, .cc, .c++]
+  py: [.py]
+  java: [.java]
+
+  cpp14: [cpp4, c++14]
+
+  gf19: [codeforces2019, gf19, codeforces19, codeforces, codeforces, gf]
+  gcj19: [googlecodejam2019, gcj19, codejam19, googlecodejam, codejam, gcj]
+...
